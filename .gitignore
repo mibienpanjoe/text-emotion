@@ -1,0 +1,13 @@
+# Dataset. Download with download_data.py. Too large to publish.
+data/
+
+# Training plots, reports, and weights.
+outputs/
+
+# Local environments and caches.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.mplconfig/
