@@ -80,17 +80,60 @@ A **DataLoader** yields `(token ids, lengths, labels)`. Shuffle is on for traini
 
 ## 5. The network
 
-Three layers, in order.
+The class in `model.py` is `EmotionLSTM`. It is three modules, and only those three. There is one LSTM layer, it reads left to right, and nothing is pretrained. Every weight is learned from these messages, which keeps each piece small enough to explain.
 
-**Embedding.** A lookup table. Each word id picks a vector of 128 numbers. At the start those vectors are random. Training moves words that play a similar role in these messages toward each other. The padding row stays at zero because it is marked as `padding_idx`.
+```text
+word ids  →  Embedding  →  LSTM, one step per word  →  Linear  →  6 logits
+(batch, T)   (batch, T, 128)   last hidden (batch, 128)         (batch, 6)
+```
 
-**LSTM.** A recurrent layer. It reads the vectors from left to right. At each word it updates a hidden state, which is its memory of the message so far. The hidden size is 128. After the last real word, that memory is a single vector meant to summarize the message.
+`T` is the length of the message after padding. In the reference run the vocabulary has 7,401 rows: one for `<pad>`, one for `<unk>`, and one for every training word seen at least twice.
 
-`pack_padded_sequence` tells the LSTM where each message actually ends. Without it, the padding tokens would keep updating the memory after the sentence is over.
+### Embedding
 
-**Linear layer.** It turns the final memory into 6 logits, one per emotion.
+An embedding is a lookup table of shape `7,401 × 128`. The integer id of a word selects one row. That row is a vector of 128 numbers. At the start the rows are random. Training moves words that play a similar role in these messages toward each other, so "happy" and "glad" can end up nearby if the data supports it. The row for `<pad>` stays the zero vector because it is marked as `padding_idx`. A padding position must not look like a real word.
 
-Nothing here is pretrained. Every weight is learned from these messages. That is deliberate: each layer is small enough to explain. A later experiment can replace the embedding, or the whole network, with a pretrained transformer and compare the test report.
+### Why the order of the words matters
+
+A bag of words would throw the words into one pile and average them. Then "I am happy" and "I am not happy" look similar, because they contain almost the same words. Emotion often depends on order and on a word that happened a few positions earlier ("not", "but", "still"). A recurrent layer exists for that. It reads the vectors one by one and keeps a memory.
+
+### What the LSTM keeps
+
+A plain recurrent layer has one memory vector. At every new word it mixes that memory with the new word and overwrites it. Over a long sentence the early words get multiplied away. That is the vanishing-gradient problem: the signal from "not" at the start can disappear before the end.
+
+An **LSTM** (long short-term memory) keeps two vectors of size 128 at every step:
+
+- The **cell state** is the memory tape. It is added to more than it is multiplied, so a value written early can still be there at the last word.
+- The **hidden state** is the part of that memory the layer is willing to show. The next word sees the hidden state, and the final hidden state is what our linear layer reads.
+
+Both start at zero before the first word. After each word they are replaced by a new pair.
+
+### The three gates
+
+At each word the LSTM builds three valves, called gates. Each valve is a small layer that looks at the current word vector and the previous hidden state, then squashes the result with a **sigmoid**. A sigmoid output is between 0 and 1. Multiplied by another vector, 0 means "let nothing through" and 1 means "let all of it through".
+
+- **Forget gate.** How much of the old cell state to keep. Near 0, the previous memory is dropped. Near 1, it is carried forward.
+- **Input gate.** How much of a new candidate to write into the cell. The candidate itself is a **tanh** of the current word and the previous hidden state, so its values lie between −1 and 1.
+- **Output gate.** How much of the updated cell to reveal as the new hidden state. The cell can remember something that the hidden state does not yet show.
+
+The update, in words: new cell = forget gate × old cell + input gate × candidate. New hidden = output gate × tanh(new cell). PyTorch does this arithmetic inside `nn.LSTM`. We do not code the gates ourselves. The weights of those valves are what Adam learns.
+
+### One sentence, step by step
+
+Take "i feel romantic too", which is a love example in the training set.
+
+1. Tokenize to `["i", "feel", "romantic", "too"]`, then replace each word by its id. Shape: `(4,)`. In a batch of 64 this becomes `(64, T)`.
+2. The embedding turns each id into 128 numbers. Shape: `(64, T, 128)`.
+3. The LSTM reads "i", updates cell and hidden, then "feel", then "romantic", then "too". Each step uses the memory from the step before.
+4. `pack_padded_sequence` tells the LSTM the real length of each message in the batch. Shorter messages are padded with `<pad>` so the batch is a rectangle. Without packing, those pad positions would keep updating the memory after the sentence is over.
+5. The LSTM returns a hidden tensor of shape `(num_layers, batch, 128)`. We have one layer, so `hidden[-1]` is `(batch, 128)`: the hidden state after the last real word. The cell state is discarded here. It has already done its job by shaping that hidden state.
+6. The linear layer is a matrix of shape `128 × 6` plus a bias of 6. It maps the summary vector to one logit per emotion.
+
+The largest logit wins. Softmax is only for the printed probabilities, not for the loss.
+
+### What this model is not
+
+It is not bidirectional: it never looks ahead at "too" while it is reading "feel". The later words still influence the final hidden state, because that state is produced after them. It is not stacked: there is no second LSTM reading the first LSTM's outputs. It is not a transformer: there is no attention over all words at once. Those are possible upgrades. This version is the one we can draw and defend.
 
 ## 6. Training
 
@@ -158,9 +201,16 @@ That 86.9% is the reference run with seed 42 and eight epochs. Macro F1 on the s
 | Vocabulary | The list of words that receive their own id |
 | Unknown token | A word that is not in the vocabulary |
 | Padding | Filler ids that make a batch rectangular |
-| Embedding | A learned vector for each word id |
-| LSTM | A recurrent layer that keeps a memory while it reads left to right |
-| Hidden state | That memory after the last real word |
+| Embedding | A learned vector of 128 numbers for each word id |
+| Recurrent layer | A layer that reads a sequence one step at a time and keeps a memory |
+| LSTM | A recurrent layer with a cell state and three gates, so early words can survive |
+| Cell state | The LSTM's memory tape, updated by addition at each word |
+| Hidden state | The part of that memory exposed to the next word and to the classifier |
+| Gate | A sigmoid valve between 0 and 1 that lets information through or blocks it |
+| Forget gate | How much of the previous cell state to keep |
+| Input gate | How much of the new candidate to write into the cell |
+| Output gate | How much of the cell to reveal as the hidden state |
+| Vanishing gradient | Early words losing their effect because a plain recurrent memory is repeatedly shrunk |
 | Logit | Raw score for one emotion, before probabilities |
 | Softmax | Turns logits into probabilities that sum to 1 |
 | Epoch | One full pass over the training set |
