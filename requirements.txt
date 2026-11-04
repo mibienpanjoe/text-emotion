@@ -1,6 +1,4 @@
 torch
-torchvision
 matplotlib
 scikit-learn
-pillow
 pyarrow
