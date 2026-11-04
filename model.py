@@ -1,25 +1,28 @@
-"""A small pretrained vision network, adapted to 43 traffic-sign classes."""
+"""An embedding and an LSTM that score six emotions."""
 
+import torch
 import torch.nn as nn
-from torchvision.models import MobileNet_V2_Weights, mobilenet_v2
+from torch.nn.utils.rnn import pack_padded_sequence
 
-from class_names import CLASS_NAMES
+from emotions import EMOTIONS
 
 
-def build_model(freeze_features: bool = True) -> nn.Module:
-    """MobileNetV2 with a new final layer for GTSRB.
+class EmotionLSTM(nn.Module):
+    """Read a sentence word by word and classify the final memory.
 
-    The convolutional trunk already detects edges, colors, and simple shapes
-    from ImageNet. We keep those weights and only replace the classifier,
-    which originally predicted 1000 everyday object categories.
+    Padding positions are packed away, so they do not change that memory.
     """
-    weights = MobileNet_V2_Weights.DEFAULT
-    network = mobilenet_v2(weights=weights)
 
-    if freeze_features:
-        for parameter in network.features.parameters():
-            parameter.requires_grad = False
+    def __init__(self, vocab_size: int, embed_dim: int = 128, hidden_dim: int = 128, pad_id: int = 0):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_id)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
+        self.classifier = nn.Linear(hidden_dim, len(EMOTIONS))
 
-    in_features = network.classifier[1].in_features
-    network.classifier[1] = nn.Linear(in_features, len(CLASS_NAMES))
-    return network
+    def forward(self, token_ids: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        embedded = self.embedding(token_ids)
+        packed = pack_padded_sequence(
+            embedded, lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        _, (hidden, _) = self.lstm(packed)
+        return self.classifier(hidden[-1])
