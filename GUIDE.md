@@ -51,9 +51,11 @@ This is **supervised classification**. The dataset already contains the label fo
 
 ## 3. The dataset
 
-The Emotion dataset (published with the paper "CARER: Contextualized Affect Representations for Emotion Recognition", and distributed as `dair-ai/emotion`) is a set of English messages collected for emotion classification.
+The messages are English tweets. Saravia, Liu, Huang, Wu, and Chen collected them for the 2018 paper "CARER: Contextualized Affect Representations for Emotion Recognition". They did not ask a person to label every tweet. They used **distant supervision**: a hashtag at the end of the tweet, such as `#joy` or `#sadness`, was taken as a noisy label. The tweet was then cleaned. Letters were lowercased, and user names and links were set aside. The label hashtag was not left in the text, so a model cannot score well by simply reading the tag.
 
-`download_data.py` fetches the standard split:
+The original paper used eight emotions. The copy we train on is the later six-emotion teaching release from the same authors. Hugging Face publishes it as `dair-ai/emotion`. We download the prepared split, not the larger file of about 417,000 messages.
+
+`download_data.py` fetches that split:
 
 - 16,000 training messages
 - 2,000 validation messages
