@@ -1,16 +1,26 @@
-"""Train the sign classifier and keep the weights with the best validation accuracy."""
+"""Train the emotion classifier and keep the best validation accuracy."""
 
 import argparse
+from collections import Counter
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 
 from data import load_splits, make_loader
-from model import build_model
+from emotions import EMOTIONS
+from model import EmotionLSTM
 
 OUTPUT = Path(__file__).resolve().parent / "outputs"
 CHECKPOINT = OUTPUT / "model.pt"
+
+
+def class_weights(labels: list[int], device: torch.device) -> torch.Tensor:
+    """Give rarer emotions a larger share of the loss."""
+    counts = Counter(labels)
+    total = len(labels)
+    weights = [total / (len(EMOTIONS) * counts[index]) for index in range(len(EMOTIONS))]
+    return torch.tensor(weights, dtype=torch.float, device=device)
 
 
 def run_epoch(network, loader, criterion, device, optimizer=None):
@@ -20,52 +30,51 @@ def run_epoch(network, loader, criterion, device, optimizer=None):
     correct = 0
     seen = 0
 
-    for images, labels in loader:
-        images = images.to(device)
+    for token_ids, lengths, labels in loader:
+        token_ids = token_ids.to(device)
         labels = labels.to(device)
         if training:
             optimizer.zero_grad()
 
         with torch.set_grad_enabled(training):
-            logits = network(images)
+            logits = network(token_ids, lengths)
             loss = criterion(logits, labels)
             if training:
                 loss.backward()
                 optimizer.step()
 
-        total_loss += loss.item() * images.size(0)
+        total_loss += loss.item() * labels.size(0)
         correct += (logits.argmax(dim=1) == labels).sum().item()
-        seen += images.size(0)
+        seen += labels.size(0)
 
     return total_loss / seen, correct / seen
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
 
+    torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
 
-    train_set, val_set, _ = load_splits()
-    train_loader = make_loader(train_set, shuffle=True)
-    val_loader = make_loader(val_set, shuffle=False)
-    print(f"train images: {len(train_set)}   val images: {len(val_set)}")
+    train_set, val_set, _, vocabulary = load_splits()
+    print(f"train texts: {len(train_set)}   validation texts: {len(val_set)}")
+    print(f"vocabulary size: {len(vocabulary)}")
 
-    network = build_model().to(device)
-    criterion = nn.CrossEntropyLoss()
-    trainable = [p for p in network.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable, lr=args.lr)
+    network = EmotionLSTM(len(vocabulary), pad_id=vocabulary.pad_id).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights(train_set.labels, device))
+    optimizer = torch.optim.Adam(network.parameters(), lr=args.lr)
 
     OUTPUT.mkdir(exist_ok=True)
     best_accuracy = 0.0
+    train_loader = make_loader(train_set, shuffle=True)
+    val_loader = make_loader(val_set, shuffle=False)
 
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = run_epoch(
-            network, train_loader, criterion, device, optimizer
-        )
+        train_loss, train_acc = run_epoch(network, train_loader, criterion, device, optimizer)
         val_loss, val_acc = run_epoch(network, val_loader, criterion, device)
         print(
             f"epoch {epoch}/{args.epochs}  "
@@ -75,7 +84,11 @@ def main():
         if val_acc > best_accuracy:
             best_accuracy = val_acc
             torch.save(
-                {"state_dict": network.state_dict(), "val_accuracy": val_acc},
+                {
+                    "state_dict": network.state_dict(),
+                    "vocab": vocabulary.tokens,
+                    "val_accuracy": val_acc,
+                },
                 CHECKPOINT,
             )
             print(f"  saved {CHECKPOINT}")
