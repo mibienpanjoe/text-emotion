@@ -1,144 +1,132 @@
-# Traffic sign recognition
+# Text emotion classification
 
-A camera sees one cropped traffic sign. The program answers with the sign's name, plus how sure it is. That answer is what a small robot or a driver-assist demo would use to decide "stop", "yield", or "speed limit 50".
+A person writes a short message. The program answers with one of six emotions: sadness, joy, love, anger, fear, or surprise, plus how sure it is.
 
 The repository root is the project. This file is the study notes. [README.md](README.md) is the short public overview. Read a section here, then run the matching command.
 
 ## What you will have at the end
 
-- A dataset of real German traffic signs (GTSRB), 43 classes.
-- A convolutional neural network trained on those photos.
+- A public dataset of English messages, each already labeled with one emotion.
+- A neural network that reads the words in order and predicts that emotion.
 - A test accuracy, a per-class report, and a confusion matrix.
-- A command that classifies one new image.
+- A command that classifies one new sentence.
 
-Finding the sign inside a full street photo is a different problem (object detection). We start from photos where the sign is already the subject, which is the right size for two days.
+This is text classification. The model does not write a reply. It chooses one label.
 
 ## Map of the files
 
 | File | Role |
 |---|---|
-| `download_data.py` | Fetch the two Parquet tables into `data/hf/` |
-| `class_names.py` | The 43 names, in the official id order (0 = Speed limit 20, 14 = Stop, …) |
-| `data.py` | Resize, augment, and batch the images |
+| `download_data.py` | Fetch the three Parquet tables into `data/hf/` |
+| `emotions.py` | The six names, in official id order (0 = sadness, 1 = joy, …) |
+| `data.py` | Tokenize, build the vocabulary, pad, and batch |
 | `model.py` | The neural network |
-| `explore.py` | Look at the data before training |
+| `explore.py` | Look at the messages before training |
 | `train.py` | Fit the network and save the best weights |
-| `evaluate.py` | Score those weights on images the network never trained on |
-| `predict.py` | Classify one photo |
+| `evaluate.py` | Score those weights on messages the network never trained on |
+| `predict.py` | Classify one message |
 
-`data/` holds the downloaded images. `outputs/` holds the plot, the saved weights, and the test report. Both are listed in `.gitignore`, so they stay on this machine when the code is published. The plots and the accuracy numbers belong in a write-up. The raw files do not.
+`data/` holds the downloaded tables. `outputs/` holds the chart, the saved weights, and the test report. Both are listed in `.gitignore`, so they stay on this machine when the code is published.
 
 ## 1. The learning problem
 
-Each example is a pair `(image, class id)`. The class id is an integer from 0 to 42. The network does not output the name directly. It outputs 43 numbers, called **logits**. The largest logit is the predicted class. A **softmax** turns those logits into probabilities that add up to 1, which is what `predict.py` prints.
+Each example is a pair `(text, emotion id)`. The id is an integer from 0 to 5. The network outputs 6 numbers, called **logits**. The largest logit is the predicted emotion. A **softmax** turns those logits into probabilities that add up to 1, which is what `predict.py` prints.
 
-This is **supervised classification**: every training photo already has the correct label. The dataset authors labeled them. We do not invent labels.
+This is **supervised classification**. The dataset already contains the label for every message.
 
 ## 2. Libraries, and why each one is here
 
-**PyTorch** (`torch`) is the framework that trains the network.
+**PyTorch** (`torch`) trains the network.
 
-- A **tensor** is a multi-dimensional array that can live on CPU or GPU and can remember how it was computed.
+- A **tensor** is a multi-dimensional array that can remember how it was computed.
 - **Autograd** records those computations so `loss.backward()` can compute a gradient for every trainable weight.
-- `torch.nn` holds layers (a linear layer, a convolution) and losses.
-- `torch.optim` holds optimizers such as Adam, which apply those gradients to the weights.
+- `torch.nn` holds the embedding, the LSTM, the linear layer, and the loss.
+- `torch.optim` holds Adam, which applies those gradients to the weights.
 
-**torchvision** sits on top of PyTorch for images.
+**PyArrow** reads the dataset. Each row in the Parquet table is a message and an integer label.
 
-- `datasets.GTSRB` downloads the benchmark and returns `(image, label)` pairs.
-- `transforms` resizes, augments, and converts a PIL image into a tensor.
-- `models.mobilenet_v2` is a published convolutional architecture with weights already trained on ImageNet.
+**matplotlib** draws the class-count bar chart and the confusion matrix.
 
-**Pillow** reads image files. You rarely call it yourself; torchvision opens each file with it.
-
-**matplotlib** draws the sample grid and the confusion matrix.
-
-**scikit-learn** is not the trainer. We use only its metrics: precision, recall, and the confusion matrix. Training stays in PyTorch.
+**scikit-learn** is not the trainer. It only computes precision, recall, and the confusion matrix after prediction.
 
 ## 3. The dataset
 
-GTSRB (German Traffic Sign Recognition Benchmark) is a public dataset from Ruhr University Bochum, published for driver-assistance research. The usual PyTorch path is `torchvision.datasets.GTSRB`, which downloads a zip of `.ppm` photos from `sid.erda.dk`. That server did not accept a connection from this machine, so the project uses the same benchmark as published on Hugging Face (`tanganke/gtsrb`).
+The Emotion dataset (published with the paper "CARER: Contextualized Affect Representations for Emotion Recognition", and distributed as `dair-ai/emotion`) is a set of English messages collected for emotion classification.
 
-The files in `data/hf/` are **Parquet** tables, a columnar file format. **PyArrow** reads them. Each row is an image (raw bytes) and an integer label. Pillow turns those bytes back into a photo inside `SignDataset`.
+`download_data.py` fetches the standard split:
 
-Counts in this copy:
+- 16,000 training messages
+- 2,000 validation messages
+- 2,000 test messages
+- 6 classes, ids 0 through 5
 
-- 26,640 training photos
-- 12,630 test photos
-- 43 classes, ids 0 through 42
+The classes are unbalanced. Joy and sadness are common. Surprise and love are smaller. A single accuracy number can look strong while a rare emotion is weak, which is why the evaluation report lists every class.
 
-The classic zip has about 39,000 training photos. This release is smaller and is the one we actually train on. The test set size matches the official test set.
+The official **test split stays untouched** until `evaluate.py`. The published **validation split** is what `train.py` uses to decide which checkpoint to keep. We do not cut a second validation set out of the training messages.
 
-The classes are unbalanced. In this training table, Speed limit 30 and Speed limit 50 have 1,500 photos each. Speed limit 20, Curve left, and Straight or left have 150. A single accuracy number can look strong while a rare class is weak, which is why the evaluation report lists every class.
+## 4. From a message to a tensor
 
-Images are `.ppm` files of different sizes, often small (around 30 to 100 pixels). The network needs one fixed size, so every photo is resized to 64×64.
+A sentence is not a tensor. Four steps make it one.
 
-The official **test split stays untouched** until `evaluate.py`. During training we hold out 20% of the training images as a **validation set**. Validation tells us when to keep a checkpoint. The test set is the number you report, because the network never used it to update weights or to pick a checkpoint.
+1. **Tokenize.** `tokenize` lowercases the text and keeps words, numbers, and apostrophes. `"I can't believe it"` becomes `["i", "can't", "believe", "it"]`. Punctuation is dropped. The label does not depend on the comma.
 
-## 4. From a photo to a tensor
+2. **Vocabulary.** Training builds a dictionary from the training messages only. A word seen at least twice gets an integer id. Index 0 is `<pad>`. Index 1 is `<unk>`. A word that is rare, or that appears only in a test message, becomes `<unk>`. Building this dictionary on the test set would leak information.
 
-A color photo is height × width × 3 (red, green, blue), values 0–255. The network wants a tensor of shape `3 × 64 × 64`, values roughly centered around 0.
+3. **Encode.** A message becomes a list of ids, cut at 40 tokens. These messages are short, so 40 is enough. An empty result becomes a single `<unk>`, so the LSTM always receives at least one step.
 
-`eval_transform` does three things, in order:
+4. **Pad and batch.** Messages in one batch have different lengths. `pad_sequence` extends the shorter ones with `<pad>` so they form a rectangle of shape `batch × longest`. A separate length vector records the real length. The LSTM uses that length to ignore the padding.
 
-1. **Resize** to 64×64.
-2. **ToTensor** turns the PIL image into a float tensor and scales pixels from 0–255 to 0–1. It also moves channels from the last dimension to the first, which is PyTorch's image layout.
-3. **Normalize** subtracts the ImageNet mean and divides by the ImageNet standard deviation, separately per channel. MobileNetV2's pretrained filters expect that scale. Skipping it makes the pretrained trunk much less useful.
-
-`train_transform` adds two random changes before that, so each epoch shows a slightly different version of the same sign:
-
-- **RandomRotation(15)** tilts the sign up to 15 degrees. Real cameras are rarely perfectly level.
-- **ColorJitter** changes brightness, contrast, and saturation. Signs are photographed in sun, shade, and dusk.
-
-There is no horizontal flip. A mirrored "turn right" is a different sign. Augmentation has to preserve the label.
-
-A **DataLoader** stacks images into a batch. With `BATCH_SIZE = 64`, each training step sees a tensor of shape `64 × 3 × 64 × 64` and a label vector of length 64. Shuffle is on for training, off for validation and test, so the score does not depend on order.
+A **DataLoader** yields `(token ids, lengths, labels)`. Shuffle is on for training and off for validation and test.
 
 ## 5. The network
 
-A **convolutional neural network** slides small filters over the image. Early filters respond to edges and color blobs. Later filters respond to corners, digits, and the triangular or circular outline of a sign.
+Three layers, in order.
 
-We do not train those filters from random weights. **Transfer learning** starts from MobileNetV2, which was trained on ImageNet (about 1.2 million everyday photos, 1000 classes). The early filters are already useful for any photograph. We **freeze** them (`requires_grad = False`), so Adam does not change them.
+**Embedding.** A lookup table. Each word id picks a vector of 128 numbers. At the start those vectors are random. Training moves words that play a similar role in these messages toward each other. The padding row stays at zero because it is marked as `padding_idx`.
 
-The original last layer predicts 1000 ImageNet classes. We throw that layer away and put in a new `Linear` layer with 43 outputs, one per sign. Only this new layer, and the small dropout layer in front of it, is trained. That is why a few epochs on a CPU are enough.
+**LSTM.** A recurrent layer. It reads the vectors from left to right. At each word it updates a hidden state, which is its memory of the message so far. The hidden size is 128. After the last real word, that memory is a single vector meant to summarize the message.
 
-MobileNetV2 is the small member of the MobileNet family, built for phones and robots. ResNet18 would also work; it is heavier and slower on this CPU.
+`pack_padded_sequence` tells the LSTM where each message actually ends. Without it, the padding tokens would keep updating the memory after the sentence is over.
 
-Forward pass, in one sentence: the frozen trunk turns a 64×64 photo into a feature vector, and the linear layer turns that vector into 43 logits.
+**Linear layer.** It turns the final memory into 6 logits, one per emotion.
+
+Nothing here is pretrained. Every weight is learned from these messages. That is deliberate: each layer is small enough to explain. A later experiment can replace the embedding, or the whole network, with a pretrained transformer and compare the test report.
 
 ## 6. Training
 
-**Loss.** `CrossEntropyLoss` compares the 43 logits to the true class id. It is low when the true class has the largest logit, and high when a wrong class does. Inside the loss, log-softmax is applied for you. You do not softmax before this loss.
+**Loss.** `CrossEntropyLoss` compares the 6 logits to the true emotion id. It is low when the true class has the largest logit. Log-softmax is inside the loss. You do not softmax before it.
 
-**Optimizer.** Adam updates only the weights with `requires_grad = True`. The learning rate `1e-3` is a standard first choice for a new classifier head.
+The classes are unbalanced, so the loss uses a **weight per class**. A rare emotion contributes more when it is missed. The weight for a class is `total / (6 * count of that class)`, computed on the training split only.
 
-**Epoch.** One epoch means every training image has been seen once. Each batch produces a loss, `backward()` fills gradients, and `step()` changes the weights.
+**Optimizer.** Adam updates every weight: embedding, LSTM, and classifier. The learning rate `1e-3` is a standard first choice.
+
+**Epoch.** One epoch means every training message has been seen once.
 
 **What we print.**
 
 - Train loss should fall.
 - Validation accuracy should rise, then flatten.
-- If train accuracy keeps climbing while validation accuracy falls, the model is memorizing. Five epochs with a frozen trunk usually does not do that.
+- If train accuracy keeps climbing while validation accuracy falls, the model is memorizing.
 
-`train.py` writes `outputs/model.pt` whenever validation accuracy improves. The file contains the weights (`state_dict`) and the validation accuracy at that moment. Later scripts load those weights. They do not keep training.
+`train.py` writes `outputs/model.pt` whenever validation accuracy improves. The file contains the weights, the vocabulary, and the validation accuracy at that moment. Prediction must use that same vocabulary. A word list built later, or from different texts, would point the ids at the wrong rows of the embedding.
 
 ## 7. Evaluation
 
-`evaluate.py` loads the checkpoint, runs the official test set with no gradient and no augmentation, and compares predicted ids with true ids.
+`evaluate.py` loads the checkpoint, runs the test split with no gradient, and compares predicted ids with true ids.
 
-**Accuracy** is the fraction of test images where the predicted id equals the true id. It is the headline number.
+**Accuracy** is the fraction of test messages where the predicted id equals the true id.
 
-**Precision** for one class: of the images we called "Stop", how many really were Stop.
+**Precision** for one emotion: of the messages we called "anger", how many really were anger.
 
-**Recall** for one class: of the real Stop images, how many we called Stop.
+**Recall** for one emotion: of the real anger messages, how many we called anger.
 
-**Macro average** in the report is the unweighted mean across the 43 classes. It drops if rare classes fail, even when overall accuracy stays high. That is the number to mention next to accuracy.
+**Macro average** is the unweighted mean across the six emotions. It drops if surprise or love fails, even when overall accuracy stays high.
 
-The **confusion matrix** is a 43×43 grid. Row is the true class, column is the predicted class. A clean model is bright on the diagonal. Off-diagonal spots are the mistakes worth showing in a presentation (speed limits confused with each other is the usual one, because they share a shape and differ by digits).
+The **confusion matrix** is a 6×6 grid. Row is the true emotion, column is the predicted one. A clean model is bright on the diagonal. The usual confusions are joy with love, and sadness with anger, because the words overlap.
 
-## 8. One image
+## 8. One message
 
-`predict.py` opens a file, applies `eval_transform` (never the random training transform), adds a batch dimension with `unsqueeze(0)`, and runs the network. Softmax turns logits into probabilities. The top three are printed so a near-tie is visible, not only the winner.
+`predict.py` tokenizes with the saved vocabulary, runs the network, and prints the top three probabilities. There is no padding step, because a single message does not need to be lined up with another one.
 
 ## Commands
 
@@ -147,33 +135,37 @@ From this directory:
 ```bash
 python3 download_data.py
 python3 explore.py
-python3 train.py --epochs 5
+python3 train.py --epochs 8
 python3 evaluate.py
-python3 predict.py path/to/a_sign.jpg
+python3 predict.py "I can't believe I got the job"
 ```
 
-`download_data.py` writes `data/hf/train.parquet` and `data/hf/test.parquet`. If those files are already present, it leaves them alone.
+`download_data.py` writes `data/hf/train.parquet`, `validation.parquet`, and `test.parquet`. If those files are already present, it leaves them alone.
 
 ## How to talk about it
 
 One possible closing sentence for the presentation:
 
-> We trained a MobileNetV2 classifier on GTSRB. The convolutional features come from ImageNet and stay frozen. A new 43-way layer is trained with cross-entropy. On the official test set the accuracy is X, and the main confusions are between similar speed-limit signs.
+> We trained an embedding and an LSTM on the Emotion dataset. Each message is a sequence of word ids. The LSTM summarizes that sequence, and a linear layer scores six emotions. On the official test set the accuracy is 86.9%, and the main confusions are between emotions that share wording, such as joy and love.
 
-Fill in X after `evaluate.py`.
+That 86.9% is the reference run with seed 42 and eight epochs. Macro F1 on the same run is 0.825. Surprise is the rarest training class and the weakest test class.
 
 ## Glossary
 
 | Word | Meaning in this project |
 |---|---|
-| Class | One sign type, an integer 0–42 |
-| Logit | Raw score for one class, before probabilities |
+| Token | A word after lowercasing |
+| Vocabulary | The list of words that receive their own id |
+| Unknown token | A word that is not in the vocabulary |
+| Padding | Filler ids that make a batch rectangular |
+| Embedding | A learned vector for each word id |
+| LSTM | A recurrent layer that keeps a memory while it reads left to right |
+| Hidden state | That memory after the last real word |
+| Logit | Raw score for one emotion, before probabilities |
 | Softmax | Turns logits into probabilities that sum to 1 |
 | Epoch | One full pass over the training set |
-| Batch | The 64 images used for one weight update |
-| Loss | Cross-entropy; how wrong the logits are |
-| Validation set | 20% of train, used only to pick the checkpoint |
-| Test set | Official GTSRB test images, used once at the end |
-| Transfer learning | Reuse a network trained on a different image task |
-| Frozen weights | Filters we do not update |
-| Confusion matrix | Counts of true class versus predicted class |
+| Batch | The 64 messages used for one weight update |
+| Loss | Weighted cross-entropy; how wrong the logits are |
+| Validation set | The published 2,000 messages used to pick the checkpoint |
+| Test set | The published 2,000 messages used once at the end |
+| Confusion matrix | Counts of true emotion versus predicted emotion |
